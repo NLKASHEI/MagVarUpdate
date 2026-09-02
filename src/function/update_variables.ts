@@ -1547,20 +1547,24 @@ export async function handleVariablesInMessage(message_id: number) {
         }
     }
     const updater = (data: Record<string, any>) => {
-        data.initialized_lorebooks = variables.initialized_lorebooks;
-        data.stat_data = variables.stat_data;
-        if (variables.schema !== undefined) {
-            _.set(data, 'schema', variables.schema);
+        // `updateVariablesWith` stores the object returned by this callback. Do not attach
+        // references from `variables` directly: a later update can otherwise mutate the
+        // snapshot that was already persisted on an earlier message floor.
+        const snapshot = klona(variables);
+        data.initialized_lorebooks = snapshot.initialized_lorebooks;
+        data.stat_data = snapshot.stat_data;
+        if (snapshot.schema !== undefined) {
+            _.set(data, 'schema', snapshot.schema);
         } else {
             _.unset(data, 'schema');
         }
-        if (variables.display_data !== undefined) {
-            _.set(data, 'display_data', variables.display_data);
+        if (snapshot.display_data !== undefined) {
+            _.set(data, 'display_data', snapshot.display_data);
         } else {
             _.unset(data, 'display_data');
         }
-        if (variables.delta_data !== undefined) {
-            _.set(data, 'delta_data', variables.delta_data);
+        if (snapshot.delta_data !== undefined) {
+            _.set(data, 'delta_data', snapshot.delta_data);
         } else {
             _.unset(data, 'delta_data');
         }

@@ -1064,6 +1064,13 @@ export function registerFunctionTests({ mvuZod = false }: FunctionTestOptions = 
             expect(updatedMessageVariables.delta_data.level).toBeUndefined();
 
             expect(updatedMessageVariables.initialized_lorebooks).toEqual(['book1']); // 更新后的值
+
+            // 每次写入消息楼层都必须得到独立的快照，不能共享嵌套变量引用。
+            const anotherMessageVariables = updater({});
+            updatedMessageVariables.stat_data.health = 1;
+            updatedMessageVariables.display_data.health = 'mutated';
+            expect(anotherMessageVariables.stat_data.health).toBe(80);
+            expect(anotherMessageVariables.display_data.health).toBe('100->80 (受到伤害)');
         });
 
         test('变量未修改但启用兼容选项时仍应更新chat级别变量', async () => {

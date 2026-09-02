@@ -237,13 +237,13 @@ export const buttons: Button[] = [
             cleanUpMetadata(merged_data.stat_data);
 
             // 6. 更新变量到最新消息
-            await replaceVariables(merged_data, { type: 'message', message_id: message_id });
+            await replaceVariables(klona(merged_data), { type: 'message', message_id: message_id });
 
             // @ts-expect-error 该函数可用
             await setChatMessage({}, message_id);
 
             if (useDataStore().effective_settings.兼容性.更新到聊天变量) {
-                await replaceVariables(merged_data, { type: 'chat' });
+                await replaceVariables(klona(merged_data), { type: 'chat' });
             }
 
             console.info(tr('runtime.button.initVarDescriptionsUpdated'));

@@ -62,20 +62,23 @@ export async function restoreVariables() {
         if (i >= last_20th_message_id && !is_valid_message) {
             await updateVariablesWith(
                 data => {
-                    data.initialized_lorebooks = variables.initialized_lorebooks;
-                    data.stat_data = variables.stat_data;
-                    if (variables.schema !== undefined) {
-                        data.schema = variables.schema;
+                    // Each restored floor must own an independent snapshot. Without cloning,
+                    // the next replayed update mutates every floor written in this loop.
+                    const snapshot = klona(variables);
+                    data.initialized_lorebooks = snapshot.initialized_lorebooks;
+                    data.stat_data = snapshot.stat_data;
+                    if (snapshot.schema !== undefined) {
+                        data.schema = snapshot.schema;
                     } else {
                         _.unset(data, 'schema');
                     }
-                    if (variables.display_data !== undefined) {
-                        _.set(data, 'display_data', variables.display_data);
+                    if (snapshot.display_data !== undefined) {
+                        _.set(data, 'display_data', snapshot.display_data);
                     } else {
                         _.unset(data, 'display_data');
                     }
-                    if (variables.delta_data !== undefined) {
-                        _.set(data, 'delta_data', variables.delta_data);
+                    if (snapshot.delta_data !== undefined) {
+                        _.set(data, 'delta_data', snapshot.delta_data);
                     } else {
                         _.unset(data, 'delta_data');
                     }

@@ -3,6 +3,7 @@ import { tr } from '@/i18n';
 import { useDataStore } from '@/store';
 import { getLastValidVariable, isJsonPatch } from '@/util';
 import { parseString } from '@util/common';
+import { klona } from 'klona';
 
 /**
  * 最终的变量更新机制实际上是专门generate 一个新的请求，那个请求会通过 tool_call 直接更新变量。
@@ -233,9 +234,10 @@ async function onVariableUpdatedCall(args: any): Promise<string> {
 
     const has_variable_modified = await updateVariables(args.delta, variables);
     if (has_variable_modified && useDataStore().effective_settings.兼容性.更新到聊天变量) {
-        await replaceVariables(variables, { type: 'chat' });
+        // Chat-level and message-level storage must not share nested references.
+        await replaceVariables(klona(variables), { type: 'chat' });
     }
-    await replaceVariables(variables, { type: 'message', message_id: message_id });
+    await replaceVariables(klona(variables), { type: 'message', message_id: message_id });
 
     message_content += `\n\n<UpdateVariable>\n<Analysis>${args.analysis}</Analysis></Analysis>${args.delta}\n</UpdateVariable>`;
 
