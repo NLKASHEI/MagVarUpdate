@@ -1,0 +1,132 @@
+name: Sync Daoyuan MVU diagnostics
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: daoyuan-mvu-diagnostics
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      upstream: ${{ steps.plan.outputs.upstream }}
+      previous: ${{ steps.plan.outputs.previous }}
+      patch_hash: ${{ steps.plan.outputs.patch_hash }}
+      changed: ${{ steps.plan.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check upstream and diagnostic patch
+        id: plan
+        shell: bash
+        run: |
+          git fetch --no-tags https://github.com/MagicalAstrogy/MagVarUpdate.git refs/heads/beta
+          upstream=$(git rev-parse FETCH_HEAD)
+          git fetch --no-tags origin refs/heads/daoyuan-experiment
+          previous=$(git rev-parse FETCH_HEAD)
+          patch_hash=$(sha256sum .github/patches/daoyuan-mvu-diagnostics.patch | cut -d ' ' -f 1)
+          {
+            echo "upstream=$upstream"
+            echo "previous=$previous"
+            echo "patch_hash=$patch_hash"
+          } >> "$GITHUB_OUTPUT"
+          trailers=$(git show -s --format=%B "$previous" | git interpret-trailers --parse)
+          if grep -Fxq "MVU-Upstream: $upstream" <<< "$trailers" &&
+             grep -Fxq "MVU-Patch-SHA256: $patch_hash" <<< "$trailers"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git worktree add --detach "$RUNNER_TEMP/mvu" "$upstream"
+          git -C "$RUNNER_TEMP/mvu" apply --check "$GITHUB_WORKSPACE/.github/patches/daoyuan-mvu-diagnostics.patch"
+          git -C "$RUNNER_TEMP/mvu" apply "$GITHUB_WORKSPACE/.github/patches/daoyuan-mvu-diagnostics.patch"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        if: steps.plan.outputs.changed == 'true'
+        with:
+          node-version: '22'
+
+      - name: Build and verify retry and diagnostics
+        if: steps.plan.outputs.changed == 'true'
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/mvu"
+          git submodule update --init --recursive
+          corepack enable
+          corepack prepare yarn@3.4.1 --activate
+          yarn install --immutable
+          yarn jest --runInBand tests/button_pi_gate.test.ts tests/invoke_extra_model_pi_boundary.integration.test.ts
+          CI=true yarn build
+          node --check artifact/bundle.js
+          grep -q daoyuan_mvu_extra_model_diagnostic artifact/bundle.js
+          git add -- src/function/update/invoke_extra_model.ts tests/invoke_extra_model_pi_boundary.integration.test.ts artifact/bundle.js artifact/bundle.js.map artifact/bundle.js.LICENSE.txt
+          git diff --cached --binary HEAD > "$RUNNER_TEMP/release.diff"
+          test -s "$RUNNER_TEMP/release.diff"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.changed == 'true'
+        with:
+          name: daoyuan-mvu-release
+          path: ${{ runner.temp }}/release.diff
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: build
+    if: needs.build.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: daoyuan-experiment
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: daoyuan-mvu-release
+          path: ${{ runner.temp }}
+
+      - name: Publish verified bundle
+        shell: bash
+        env:
+          UPSTREAM: ${{ needs.build.outputs.upstream }}
+          PREVIOUS: ${{ needs.build.outputs.previous }}
+          PATCH_HASH: ${{ needs.build.outputs.patch_hash }}
+        run: |
+          [[ "$UPSTREAM" =~ ^[0-9a-f]{40}$ && "$PREVIOUS" =~ ^[0-9a-f]{40}$ && "$PATCH_HASH" =~ ^[0-9a-f]{64}$ ]]
+          test "$(git rev-parse HEAD)" = "$PREVIOUS"
+          git fetch --no-tags https://github.com/MagicalAstrogy/MagVarUpdate.git refs/heads/beta
+          test "$(git rev-parse FETCH_HEAD)" = "$UPSTREAM"
+          git worktree add --detach "$RUNNER_TEMP/release" "$UPSTREAM"
+          cd "$RUNNER_TEMP/release"
+          git apply --index \
+            --include=src/function/update/invoke_extra_model.ts \
+            --include=tests/invoke_extra_model_pi_boundary.integration.test.ts \
+            --include=artifact/bundle.js \
+            --include=artifact/bundle.js.map \
+            --include=artifact/bundle.js.LICENSE.txt \
+            "$RUNNER_TEMP/release.diff"
+          git restore --source="$PREVIOUS" --staged --worktree -- .github/workflows
+          tree=$(git write-tree)
+          parents=(-p "$PREVIOUS")
+          if ! git merge-base --is-ancestor "$UPSTREAM" "$PREVIOUS"; then
+            parents+=(-p "$UPSTREAM")
+          fi
+          commit=$(git -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+            commit-tree "$tree" "${parents[@]}" \
+            -m "Sync Daoyuan MVU diagnostics to ${UPSTREAM:0:7}" \
+            -m "$(printf 'MVU-Upstream: %s\nMVU-Patch-SHA256: %s' "$UPSTREAM" "$PATCH_HASH")")
+          git push origin "$commit:refs/heads/daoyuan-experiment"
