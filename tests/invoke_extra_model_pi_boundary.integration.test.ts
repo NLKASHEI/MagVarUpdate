@@ -395,7 +395,7 @@ function installCaptureRunners(fetchRecords: FetchRecord[]) {
     return { captureControllers, stop, fetchRecords };
 }
 
-function installMockNetwork(): FetchRecord[] {
+function installMockNetwork(reply = VALID_UPDATE): FetchRecord[] {
     const records: FetchRecord[] = [];
     globalThis.fetch = jest.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
         const url = new URL(typeof input === 'string' ? input : input.toString());
@@ -419,7 +419,7 @@ function installMockNetwork(): FetchRecord[] {
             url.hostname.endsWith('.provider.test') ||
             url.hostname === 'api.anthropic.com'
         ) {
-            return jsonResponse({ text: VALID_UPDATE });
+            return jsonResponse({ text: reply });
         }
         throw new Error(`Unexpected network target: ${url.origin}${url.pathname}`);
     }) as typeof fetch;
@@ -817,4 +817,64 @@ describe('requestReply production Pi capture/runtime boundary', () => {
             expect(records).toEqual([]);
         }
     );
+
+    test('reports the complete extra-model result before failed parsing', async () => {
+        const store = useDataStore();
+        store.versions.tavernhelper = '4.8.13';
+        Object.assign(store.settings.额外模型解析配置, {
+            模型来源: '与插头相同',
+            应答格式: '聊天消息',
+            破限方案: '使用内置破限',
+        });
+        const raw = 'MODEL_REPLY_START\n' + 'x'.repeat(61000) + '\nMODEL_REPLY_END';
+        (globalThis as any).generateRaw = jest.fn().mockResolvedValue(raw);
+
+        await expect(generateExtraModel()).rejects.toThrow();
+
+        const event = 'daoyuan_mvu_extra_model_diagnostic';
+        const emitted = ((globalThis as any).eventEmit as jest.Mock).mock.calls
+            .filter(([name]) => name === event)
+            .map(([, payload]) => payload);
+        expect(emitted).toEqual([
+            expect.objectContaining({ generationId: expect.any(String), status: 'started' }),
+            expect.objectContaining({
+                generationId: emitted[0].generationId,
+                status: 'rejected',
+                response: raw,
+            }),
+        ]);
+        expect(emitted[1].error).not.toContain('MODEL_REPLY_START');
+    });
+
+    test('reports the Pi provider output instead of the placeholder generation', async () => {
+        configurePi({
+            route: '使用内置破限',
+            runner: 'generateRaw',
+            provider: 'openai',
+            api: 'openai-completions',
+            endpoint: 'https://chat.provider.test/v1',
+            expectedPath: '/v1/chat/completions',
+            model: 'chat-boundary-custom',
+            contextWindow: 32_000,
+            expectedContextWindow: 32_000,
+            maxTokens: 512,
+        });
+        const raw = 'Malformed Pi output\n<UpdateVariable>\n<JSONPatch>[ invalid';
+        const records = installMockNetwork(raw);
+        installCaptureRunners(records);
+
+        await expect(generateExtraModel()).rejects.toThrow();
+
+        const event = 'daoyuan_mvu_extra_model_diagnostic';
+        const emitted = ((globalThis as any).eventEmit as jest.Mock).mock.calls
+            .filter(([name]) => name === event)
+            .map(([, payload]) => payload);
+        expect(emitted).toHaveLength(2);
+        expect(emitted[1]).toMatchObject({
+            generationId: emitted[0].generationId,
+            status: 'rejected',
+            response: raw,
+        });
+        expect(records.some(record => record.url.hostname === 'chat.provider.test')).toBe(true);
+    });
 });

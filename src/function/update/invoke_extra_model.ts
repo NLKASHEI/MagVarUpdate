@@ -48,7 +48,7 @@ import {
     parseStructuredUpdate,
     scanUpdateMarkup,
 } from './structured_update';
-import { literalYamlify, uuidv4 } from '@util/common';
+import { uuidv4 } from '@util/common';
 import { compare } from 'compare-versions';
 import { klona } from 'klona';
 import YAML from 'yaml';
@@ -605,6 +605,32 @@ export function parseAndValidateExtraModelResult(result: string): string | null 
     return null;
 }
 
+const DAOYUAN_EXTRA_MODEL_DIAGNOSTIC = 'daoyuan_mvu_extra_model_diagnostic';
+
+function emitExtraModelDiagnostic(
+    generationId: string,
+    status: 'started' | 'accepted' | 'rejected',
+    response?: string | GenerateToolCallResult,
+    error?: unknown
+): void {
+    try {
+        // 可选的观察事件，不等待日志查看器，也不参与解析与重试。
+        void eventEmit(DAOYUAN_EXTRA_MODEL_DIAGNOSTIC, {
+            generationId,
+            status,
+            response,
+            error:
+                error === undefined
+                    ? undefined
+                    : error instanceof Error
+                      ? error.message
+                      : String(error),
+        }).catch(() => undefined);
+    } catch {
+        // 诊断不可改变 MVU 的请求结果。
+    }
+}
+
 /**
  * 执行一次内部解析，登记请求级世界书策略并验证变量更新块；由外层初始化生成状态。
  * Pi 尝试从世界书读取前登记，取消标记贯穿提示词捕获和实际请求，结束时统一释放。
@@ -631,6 +657,8 @@ async function invokeExtraModel(
             ? beginPiRequestAttempt(generation_id)
             : undefined;
     let release_worldinfo_request: (() => void) | undefined;
+    let raw_response: string | GenerateToolCallResult | undefined;
+    emitExtraModelDiagnostic(generation_id, 'started');
     try {
         release_worldinfo_request = await registerWorldinfoRequest(
             generation_id,
@@ -645,7 +673,10 @@ async function invokeExtraModel(
             pi_preflight,
             request_settings,
             pi_attempt?.signal,
-            options
+            options,
+            response => {
+                raw_response = response;
+            }
         );
 
         if (options.validate_result) {
@@ -660,19 +691,21 @@ async function invokeExtraModel(
                 }
             }
             // 显式等待异步校验，使失败进入同一套请求错误记录、取消及重试处理。
-            return await options.validate_result(update);
+            const validated = await options.validate_result(update);
+            emitExtraModelDiagnostic(generation_id, 'accepted');
+            return validated;
         }
         const update = parseAndValidateExtraModelResult(result);
-        if (update !== null) return update;
+        if (update !== null) {
+            emitExtraModelDiagnostic(generation_id, 'accepted');
+            return update;
+        }
         if (pi_preflight) {
             throw await createPiProtocolError();
         }
-        throw new Error(
-            literalYamlify({
-                [tr('runtime.extraModel.updateCommandsInvalid')]: result,
-            })
-        );
+        throw new Error(tr('runtime.extraModel.updateCommandsInvalid'));
     } catch (error) {
+        emitExtraModelDiagnostic(generation_id, 'rejected', raw_response, error);
         if (pi_attempt?.signal.aborted && generation_id !== undefined) {
             throw new PiRequestAbortedError(generation_id, pi_attempt.signal.reason ?? error);
         }
@@ -804,6 +837,7 @@ function normalizeGenerateResultByResponseFormat(
  * @param request_settings 本次请求使用的配置快照。
  * @param pi_signal Pi 请求的取消信号。
  * @param options 自定义任务、附加约束及用户输入；结果校验由外层策略负责。
+ * @param onResponse 在应答格式适配前观察模型返回结果。
  * @returns 按应答格式提取后的回复文本。
  * @throws 配置、生成或严格应答格式检查失败时传播异常。
  */
@@ -813,7 +847,8 @@ async function requestReply(
     pi_preflight?: PiRuntimePreflight,
     request_settings = useDataStore().settings.额外模型解析配置,
     pi_signal?: AbortSignal,
-    options: ExtraModelInvocationOptions = {}
+    options: ExtraModelInvocationOptions = {},
+    onResponse?: (result: string | GenerateToolCallResult) => void
 ): Promise<string> {
     const store = useDataStore();
     const is_pi_request = pi_preflight !== undefined;
@@ -821,6 +856,10 @@ async function requestReply(
         throw new Error(tr('runtime.pi.invalidConfig'));
     }
     const response_format = request_settings.应答格式;
+    const normalize = (result: string | GenerateToolCallResult) => {
+        onResponse?.(result);
+        return normalizeGenerateResultByResponseFormat(result, response_format, is_pi_request);
+    };
     const is_v4_compatible_formatted_output = response_format === V4_COMPATIBLE_FORMATTED_OUTPUT;
     const supports_request_scoped_tools = !is_pi_request && supportsRequestScopedTools();
 
@@ -935,7 +974,7 @@ async function requestReply(
             pi_preflight,
             pi_signal
         );
-        return normalizeGenerateResultByResponseFormat(result, response_format, is_pi_request);
+        return normalize(result);
     }
 
     if (request_settings.破限方案 === '使用其他预设') {
@@ -951,7 +990,7 @@ async function requestReply(
             clearExtraModelRequestOverrides();
         }
 
-        return normalizeGenerateResultByResponseFormat(
+        return normalize(
             await executeGenerateRaw(
                 {
                     ...config,
@@ -960,9 +999,7 @@ async function requestReply(
                 },
                 pi_preflight,
                 pi_signal
-            ),
-            response_format,
-            is_pi_request
+            )
         );
     }
 
@@ -1007,5 +1044,5 @@ async function requestReply(
         pi_preflight,
         pi_signal
     );
-    return normalizeGenerateResultByResponseFormat(result, response_format, is_pi_request);
+    return normalize(result);
 }
